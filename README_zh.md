@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>极简 GraphRAG 实现，约 600 行 Python 代码。</b>
+  <b>极简 GraphRAG 实现，约 500 行 Python 代码</b>
 </p>
 
 <p align="center">
@@ -19,15 +19,25 @@
   <a href="https://github.com/shibing624/graphrag-lite/blob/main/README.md">English</a>
 </p>
 
-GraphRAG-Lite 是一个轻量级、教学导向的 GraphRAG（基于图的检索增强生成）实现。设计目标是让你在一个下午内理解 GraphRAG 的核心原理。
+GraphRAG-Lite 是一个简洁、教学导向的 GraphRAG（基于图的检索增强生成）实现。非常适合学习知识图谱增强 RAG 系统的核心原理。
+
+## 为什么选择 GraphRAG-Lite？
+
+- **阅读即学习**：清晰、文档完善的代码，一个下午就能理解
+- **生产级模式**：批量 Embedding、LLM 缓存等真实优化
+- **灵活检索**：4 种查询模式适应不同场景
+- **依赖精简**：仅需 `openai`、`numpy`、`tiktoken`、`loguru`
 
 ## 特性
 
-- **极简**: 约 600 行代码，易于阅读和理解
-- **零配置**: 只需 OpenAI API 密钥，无需复杂设置
-- **4 种查询模式**: local、global、mix、naive
-- **优化**: 批量 Embedding、LLM 缓存、NumPy 加速向量检索
-- **流式输出**: 支持实时响应输出
+| 特性 | 说明 |
+|------|------|
+| **4 种查询模式** | `local`、`global`、`mix`、`naive` - 选择合适的策略 |
+| **批量 Embedding** | 智能批处理减少 API 调用 |
+| **LLM 缓存** | 避免重复的 LLM 请求 |
+| **流式输出** | 实时响应流 |
+| **NumPy 加速** | 快速向量相似度搜索 |
+| **持久化存储** | 基于 JSON 存储，无需外部数据库 |
 
 ## 安装
 
@@ -35,7 +45,7 @@ GraphRAG-Lite 是一个轻量级、教学导向的 GraphRAG（基于图的检索
 pip install graphrag-lite
 ```
 
-或从源码安装:
+或从源码安装：
 
 ```bash
 git clone https://github.com/shibing624/graphrag-lite.git
@@ -53,7 +63,7 @@ from graphrag_lite import GraphRAGLite
 graph = GraphRAGLite(
     storage_path="./my_graph",
     api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL"),  # 可选
+    base_url=os.getenv("OPENAI_BASE_URL"),  # 可选：兼容 API
 )
 
 # 插入文档
@@ -63,26 +73,26 @@ graph.insert("""
 薛宝钗最终嫁给了贾宝玉。
 """)
 
-# 查询
+# 基于知识图谱上下文查询
 answer = graph.query("贾宝玉和林黛玉是什么关系？")
 print(answer)
 ```
 
 ## 查询模式
 
-| 模式 | 描述 | 适用场景 |
+| 模式 | 策略 | 适用场景 |
 |------|------|----------|
-| `local` | 实体 → 相关关系 | 特定实体问题 |
-| `global` | 关系 → 相关实体 | 关系类问题 |
-| `mix` | 实体 + 关系 + 文本块 | **推荐，适用大多数场景** |
-| `naive` | 仅文本块（传统 RAG） | 基线对比 |
+| `local` | 实体 → 相关关系 | "XX 是谁？"类问题 |
+| `global` | 关系 → 相关实体 | "XX 和 YY 什么关系？" |
+| `mix` | 实体 + 关系 + 文本块 | **通用场景（推荐）** |
+| `naive` | 仅文本块 | 基线对比 |
 
 ```python
-# 不同查询模式
+# 根据问题选择合适的模式
 answer = graph.query("贾宝玉是谁？", mode="local")
-answer = graph.query("贾宝玉是谁？", mode="global")
-answer = graph.query("贾宝玉是谁？", mode="mix")      # 推荐
-answer = graph.query("贾宝玉是谁？", mode="naive")
+answer = graph.query("贾宝玉和林黛玉什么关系？", mode="global")
+answer = graph.query("介绍一下红楼梦", mode="mix")      # 推荐
+answer = graph.query("发生了什么？", mode="naive")
 ```
 
 ## 流式输出
@@ -100,26 +110,24 @@ for chunk in graph.query("贾宝玉是谁？", stream=True):
 GraphRAGLite(
     storage_path: str = "./graphrag_data",  # 数据存储目录
     api_key: str = None,                     # OpenAI API 密钥
-    base_url: str = None,                    # OpenAI API 基础 URL
+    base_url: str = None,                    # OpenAI 兼容 API 地址
     model: str = "gpt-4o-mini",              # LLM 模型
     embedding_model: str = "text-embedding-3-small",  # Embedding 模型
-    chunk_size: int = 1200,                  # 文本块大小
-    chunk_overlap: int = 100,                # 块重叠
     enable_cache: bool = True,               # 启用 LLM 响应缓存
 )
 ```
 
 ### 方法
 
-| 方法 | 描述 |
+| 方法 | 说明 |
 |------|------|
 | `insert(text, doc_id=None)` | 插入文档并构建知识图谱 |
 | `query(question, mode="mix", top_k=10, stream=False)` | 查询知识图谱 |
-| `has_data()` | 检查是否有数据 |
-| `get_stats()` | 获取统计信息 |
+| `has_data()` | 检查图谱是否有数据 |
+| `get_stats()` | 获取图谱统计信息 |
 | `list_entities()` | 列出所有实体 |
 | `list_relations()` | 列出所有关系 |
-| `clear()` | 清除所有数据 |
+| `clear()` | 清空所有数据 |
 
 ## 工作原理
 
@@ -127,26 +135,27 @@ GraphRAGLite(
   <img src="https://github.com/shibing624/graphrag-lite/blob/main/docs/workflow.svg" alt="GraphRAG-Lite 工作流程" width="800">
 </p>
 
-1. **插入**: 文档被分块，通过 LLM 提取实体和关系，然后 Embedding 并存储
-2. **查询**: 问题用于检索相关实体/关系/文本块，构建上下文，LLM 生成答案
+**插入流程：**
+```
+文档 → 分块 → LLM 实体提取 → 批量 Embedding → 存储
+```
 
-## 与 nano-graphrag 对比
+**查询流程：**
+```
+问题 → 向量检索 → 上下文构建 → LLM 生成 → 答案
+```
 
-| 特性 | GraphRAG-Lite | nano-graphrag |
-|------|---------------|---------------|
-| 代码量 | ~600 行 | ~1100 行 |
-| 依赖 | openai, numpy, tiktoken | networkx, nano-vectordb, ... |
-| LLM 支持 | 仅 OpenAI | 多种 (OpenAI, Ollama 等) |
-| 向量存储 | 内存 + JSON | 多种后端 |
-| 异步支持 | ❌ | ✅ |
-| 定位 | **教学学习** | 生产级 |
+## 应用场景
 
-GraphRAG-Lite 专为 **学习和理解 GraphRAG 原理** 而设计，不适用于生产环境。如需生产级方案，请考虑 [nano-graphrag](https://github.com/gusye1234/nano-graphrag) 或 [LightRAG](https://github.com/HKUDS/LightRAG)。
+- **学习 GraphRAG**：理解知识图谱如何增强 RAG
+- **原型验证**：快速验证 GraphRAG 在你的领域是否有效
+- **研究基线**：比较不同检索策略的基准
+- **教学材料**：RAG 概念的教学素材
 
 ## 社区与支持
 
-*   **GitHub Issues**：有任何问题或功能请求？[提交 issue](https://github.com/shibing624/graphrag-lite/issues)。
-*   **微信**：加入我们的开发者社群！添加微信号 `xuming624`，并备注"llm"，即可加入群聊。
+*   **GitHub Issues**：[提交 issue](https://github.com/shibing624/graphrag-lite/issues)
+*   **微信**：添加 `xuming624`，备注 "llm" 加入群聊
 
 <img src="https://github.com/shibing624/graphrag-lite/blob/main/docs/wechat.jpeg" width="200" />
 
@@ -155,8 +164,6 @@ GraphRAG-Lite 专为 **学习和理解 GraphRAG 原理** 而设计，不适用�
 Apache License 2.0
 
 ## 引用
-
-如果你觉得这个项目有用，欢迎在 GitHub 上给个 ⭐！
 
 ```bibtex
 @software{graphrag-lite,

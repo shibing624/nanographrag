@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>Minimal GraphRAG implementation in ~600 lines of Python code.</b>
+  <b>Minimal GraphRAG implementation in ~500 lines of Python code.</b>
 </p>
 
 <p align="center">
@@ -19,15 +19,25 @@
   <a href="https://github.com/shibing624/graphrag-lite/blob/main/README_zh.md">中文文档</a>
 </p>
 
-GraphRAG-Lite is a lightweight, educational implementation of GraphRAG (Graph-based Retrieval-Augmented Generation). It's designed to help you understand the core principles of GraphRAG in a single afternoon.
+GraphRAG-Lite is a clean, educational implementation of GraphRAG (Graph-based Retrieval-Augmented Generation). Perfect for learning the core principles of knowledge graph enhanced RAG systems.
+
+## Why GraphRAG-Lite?
+
+- **Learn by Reading**: Clean, well-documented code you can understand in an afternoon
+- **Production Patterns**: Real-world optimizations like batch embeddings and LLM caching
+- **Flexible Retrieval**: 4 query modes for different use cases
+- **Minimal Dependencies**: Just `openai`, `numpy`, `tiktoken`, and `loguru`
 
 ## Features
 
-- **Minimal**: ~600 lines of code, easy to read and understand
-- **Zero Config**: Only requires OpenAI API key, no complex setup
-- **4 Query Modes**: local, global, mix, naive
-- **Optimized**: Batch embeddings, LLM caching, NumPy-accelerated vector search
-- **Streaming**: Real-time response output support
+| Feature | Description |
+|---------|-------------|
+| **4 Query Modes** | `local`, `global`, `mix`, `naive` - choose the right strategy |
+| **Batch Embeddings** | Reduce API calls with intelligent batching |
+| **LLM Caching** | Avoid redundant LLM requests |
+| **Streaming Output** | Real-time response streaming |
+| **NumPy Acceleration** | Fast vector similarity search |
+| **Persistent Storage** | JSON-based storage, no external database needed |
 
 ## Installation
 
@@ -53,7 +63,7 @@ from graphrag_lite import GraphRAGLite
 graph = GraphRAGLite(
     storage_path="./my_graph",
     api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL"),  # Optional
+    base_url=os.getenv("OPENAI_BASE_URL"),  # Optional: for compatible APIs
 )
 
 # Insert documents
@@ -63,26 +73,26 @@ The story features Ebenezer Scrooge, a miserly old man,
 and the ghost of his former business partner Jacob Marley.
 """)
 
-# Query
+# Query with knowledge graph context
 answer = graph.query("What is the relationship between Scrooge and Marley?")
 print(answer)
 ```
 
 ## Query Modes
 
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `local` | Entity → Related relations | Specific entity questions |
-| `global` | Relation → Related entities | Relationship questions |
-| `mix` | Entity + Relation + Text chunks | **Recommended for most cases** |
-| `naive` | Text chunks only (traditional RAG) | Baseline comparison |
+| Mode | Strategy | Best For |
+|------|----------|----------|
+| `local` | Entity → Related relations | "Who is X?" questions |
+| `global` | Relation → Related entities | "How are X and Y related?" |
+| `mix` | Entity + Relation + Chunks | **General purpose (recommended)** |
+| `naive` | Text chunks only | Baseline comparison |
 
 ```python
-# Different query modes
+# Choose the right mode for your question
 answer = graph.query("Who is Scrooge?", mode="local")
-answer = graph.query("Who is Scrooge?", mode="global")
-answer = graph.query("Who is Scrooge?", mode="mix")      # Recommended
-answer = graph.query("Who is Scrooge?", mode="naive")
+answer = graph.query("How are Scrooge and Marley connected?", mode="global")
+answer = graph.query("Tell me about the story", mode="mix")      # Recommended
+answer = graph.query("What happened?", mode="naive")
 ```
 
 ## Streaming Output
@@ -100,11 +110,9 @@ for chunk in graph.query("Who is Scrooge?", stream=True):
 GraphRAGLite(
     storage_path: str = "./graphrag_data",  # Data storage directory
     api_key: str = None,                     # OpenAI API key
-    base_url: str = None,                    # OpenAI API base URL
+    base_url: str = None,                    # OpenAI-compatible API base URL
     model: str = "gpt-4o-mini",              # LLM model
     embedding_model: str = "text-embedding-3-small",  # Embedding model
-    chunk_size: int = 1200,                  # Text chunk size
-    chunk_overlap: int = 100,                # Chunk overlap
     enable_cache: bool = True,               # Enable LLM response caching
 )
 ```
@@ -115,8 +123,8 @@ GraphRAGLite(
 |--------|-------------|
 | `insert(text, doc_id=None)` | Insert document and build knowledge graph |
 | `query(question, mode="mix", top_k=10, stream=False)` | Query the knowledge graph |
-| `has_data()` | Check if data exists |
-| `get_stats()` | Get statistics |
+| `has_data()` | Check if graph has data |
+| `get_stats()` | Get graph statistics |
 | `list_entities()` | List all entities |
 | `list_relations()` | List all relations |
 | `clear()` | Clear all data |
@@ -127,26 +135,27 @@ GraphRAGLite(
   <img src="https://github.com/shibing624/graphrag-lite/blob/main/docs/workflow.svg" alt="GraphRAG-Lite Workflow" width="800">
 </p>
 
-1. **Insert**: Documents are chunked, entities and relations are extracted via LLM, then embedded and stored
-2. **Query**: Question is used to search relevant entities/relations/chunks, context is built, LLM generates answer
+**Insert Pipeline:**
+```
+Document → Chunking → LLM Entity Extraction → Batch Embedding → Storage
+```
 
-## Comparison with nano-graphrag
+**Query Pipeline:**
+```
+Question → Vector Search → Context Building → LLM Generation → Answer
+```
 
-| Feature | GraphRAG-Lite | nano-graphrag |
-|---------|---------------|---------------|
-| Code Size | ~600 lines | ~1100 lines |
-| Dependencies | openai, numpy, tiktoken | networkx, nano-vectordb, ... |
-| LLM Support | OpenAI only | Multiple (OpenAI, Ollama, etc.) |
-| Vector Storage | In-memory + JSON | Multiple backends |
-| Async Support | ❌ | ✅ |
-| Purpose | **Educational** | Production |
+## Use Cases
 
-GraphRAG-Lite is designed for **learning and understanding GraphRAG principles**, not for production use. If you need a production-ready solution, consider [nano-graphrag](https://github.com/gusye1234/nano-graphrag) or [LightRAG](https://github.com/HKUDS/LightRAG).
+- **Learning GraphRAG**: Understand how knowledge graphs enhance RAG
+- **Prototyping**: Quickly validate GraphRAG for your domain
+- **Research**: Baseline for comparing retrieval strategies
+- **Education**: Teaching material for RAG concepts
 
 ## Community & Support
 
-*   **GitHub Issues**: Have questions or feature requests? [Submit an issue](https://github.com/shibing624/graphrag-lite/issues).
-*   **WeChat**: Join our developer community! Add WeChat ID `xuming624` with note "llm" to join the group chat.
+*   **GitHub Issues**: [Submit an issue](https://github.com/shibing624/graphrag-lite/issues)
+*   **WeChat**: Add `xuming624` with note "llm" to join the group
 
 <img src="https://github.com/shibing624/graphrag-lite/blob/main/docs/wechat.jpeg" width="200" />
 
@@ -155,8 +164,6 @@ GraphRAG-Lite is designed for **learning and understanding GraphRAG principles**
 Apache License 2.0
 
 ## Citation
-
-If you find this project useful, please consider giving it a ⭐ on GitHub!
 
 ```bibtex
 @software{graphrag-lite,
