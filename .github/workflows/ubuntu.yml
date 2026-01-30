@@ -32,9 +32,9 @@ jobs:
 
       - name: Install from PyPI
         run: |
-          pip install -U nanographrag
-          python -c "import nanographrag; print(nanographrag.__version__)"
-          pip uninstall -y nanographrag
+          pip install -U graphrag-lite
+          python -c "import graphrag_lite; print(graphrag_lite.__version__)"
+          pip uninstall -y graphrag-lite
 
       - name: Install dependencies
         run: |
