@@ -45,7 +45,7 @@ secret, and self-contained, and solitary as an oyster.
 def main():
     # 初始化
     graph = GraphRAGLite(
-        storage_path="./graphrag_demo_en",
+        storage_path="./tmp/graphrag_demo_en",
         api_key=os.getenv("OPENAI_API_KEY"),
         base_url=os.getenv("OPENAI_BASE_URL"),
         enable_cache=True,

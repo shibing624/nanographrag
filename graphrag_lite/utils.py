@@ -1,16 +1,39 @@
 # -*- coding: utf-8 -*-
 """
 @author:XuMing(xuming624@qq.com)
-@description: NanoGraphRAG 工具函数
+@description: GraphRAG-Lite 工具函数
 """
 
 import numpy as np
 import tiktoken
 
+# 缓存 tokenizer 避免重复创建
+_tokenizer_cache: dict[str, tiktoken.Encoding] = {}
 
-def get_tokenizer(model: str = "gpt-4o-mini"):
-    """获取 tokenizer"""
-    return tiktoken.encoding_for_model(model)
+
+def get_tokenizer(model: str = "text-embedding-3-small") -> tiktoken.Encoding:
+    """获取 tokenizer (带缓存)"""
+    if model not in _tokenizer_cache:
+        try:
+            _tokenizer_cache[model] = tiktoken.encoding_for_model(model)
+        except KeyError:
+            _tokenizer_cache[model] = tiktoken.get_encoding("cl100k_base")
+    return _tokenizer_cache[model]
+
+
+def count_tokens(text: str, model: str = "text-embedding-3-small") -> int:
+    """计算文本 token 数"""
+    enc = get_tokenizer(model)
+    return len(enc.encode(text))
+
+
+def truncate_text(text: str, max_tokens: int = 2000, model: str = "text-embedding-3-small") -> str:
+    """截断文本到指定 token 数"""
+    enc = get_tokenizer(model)
+    tokens = enc.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return enc.decode(tokens[:max_tokens])
 
 
 def chunk_text(

@@ -206,9 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-nanograph_demo_en/
-nanograph_demo_zh/
-
-graphrag_demo_en/
-graphrag_demo_zh/
 .node_modules/
+.DS_Store
+tmp/

@@ -37,7 +37,7 @@ SAMPLE_TEXT = """
 def main():
     # 初始化
     graph = GraphRAGLite(
-        storage_path="./graphrag_demo_zh",
+        storage_path="./tmp/graphrag_demo_zh",
         api_key=os.getenv("OPENAI_API_KEY"),
         base_url=os.getenv("OPENAI_BASE_URL"),
         enable_cache=True,

@@ -155,7 +155,7 @@ Question → Vector Search → Context Building → LLM Generation → Answer
 ## Community & Support
 
 *   **GitHub Issues**: [Submit an issue](https://github.com/shibing624/graphrag-lite/issues)
-*   **WeChat**: Add `xuming624` with note "llm" to join the group
+*   **WeChat**: Add `xuming624` with note "llm" to join the LLM tech wechat group
 
 <img src="https://github.com/shibing624/graphrag-lite/blob/main/docs/wechat.jpeg" width="200" />
 

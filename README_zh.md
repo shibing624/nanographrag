@@ -155,7 +155,7 @@ GraphRAGLite(
 ## 社区与支持
 
 *   **GitHub Issues**：[提交 issue](https://github.com/shibing624/graphrag-lite/issues)
-*   **微信**：添加 `xuming624`，备注 "llm" 加入群聊
+*   **微信群**：添加微信号 `xuming624`，并备注"llm"，即可加入大模型技术交流群。
 
 <img src="https://github.com/shibing624/graphrag-lite/blob/main/docs/wechat.jpeg" width="200" />
 

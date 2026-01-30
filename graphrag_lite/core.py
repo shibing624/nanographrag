@@ -24,13 +24,14 @@
 
 import json
 import hashlib
+import asyncio
 from pathlib import Path
-from typing import Generator
-from openai import OpenAI
+from typing import Generator, AsyncGenerator
+from openai import OpenAI, AsyncOpenAI
 from loguru import logger
 
 from .prompts import ENTITY_EXTRACTION_PROMPT, RAG_RESPONSE_PROMPT
-from .utils import chunk_text, top_k_similar
+from .utils import chunk_text, top_k_similar, count_tokens, truncate_text
 
 
 class GraphRAGLite:
@@ -61,11 +62,12 @@ class GraphRAGLite:
         self.embedding_model = embedding_model
         self.enable_cache = enable_cache
         
-        # OpenAI 客户端
+        # OpenAI 客户端 (同步 + 异步)
         client_kwargs = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
         self.client = OpenAI(**client_kwargs)
+        self.async_client = AsyncOpenAI(**client_kwargs)
         
         # 图数据存储
         self.chunks: dict[str, dict] = {}      # chunk_id -> {content, doc_id}
@@ -128,18 +130,31 @@ class GraphRAGLite:
         if not texts:
             return []
         
-        # OpenAI 单次最多 2048 个
-        batch_size = 2048
+        MAX_TOKENS = 8000
         all_embeddings = []
+        batch = []
+        batch_tokens = 0
         
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            response = self.client.embeddings.create(
+        def flush():
+            nonlocal batch, batch_tokens, all_embeddings
+            if not batch:
+                return
+            resp = self.client.embeddings.create(
                 model=self.embedding_model,
                 input=batch,
             )
-            all_embeddings.extend([d.embedding for d in response.data])
+            all_embeddings.extend([d.embedding for d in resp.data])
+            batch = []
+            batch_tokens = 0
         
+        for text in texts:
+            t = count_tokens(text, self.embedding_model)
+            if batch_tokens + t > MAX_TOKENS:
+                flush()
+            batch.append(text)
+            batch_tokens += t
+        
+        flush()
         return all_embeddings
 
     # ==================== 文档插入 ====================
@@ -265,6 +280,8 @@ class GraphRAGLite:
         if not entities:
             return
         
+        MAX_DESC_TOKENS = 2000
+        
         # 按名称分组
         grouped = {}
         for e in entities:
@@ -285,6 +302,9 @@ class GraphRAGLite:
             else:
                 merged_desc = " ".join(data["descriptions"])
             
+            # 截断过长描述
+            merged_desc = truncate_text(merged_desc, MAX_DESC_TOKENS, self.embedding_model)
+            
             self.entities[name] = {
                 "type": data["type"],
                 "description": merged_desc,
@@ -302,6 +322,8 @@ class GraphRAGLite:
         """批量合并关系"""
         if not relations:
             return
+        
+        MAX_DESC_TOKENS = 2000
         
         # 按 src||tgt 分组
         grouped = {}
@@ -324,6 +346,9 @@ class GraphRAGLite:
             else:
                 keywords = " ".join(data["keywords"])
                 description = " ".join(data["descriptions"])
+            
+            # 截断过长描述
+            description = truncate_text(description, MAX_DESC_TOKENS, self.embedding_model)
             
             self.relations[key] = {
                 "keywords": keywords,
@@ -397,11 +422,11 @@ class GraphRAGLite:
         
         top_entities = top_k_similar(query_emb, valid_keys, entity_vecs, top_k)
         
-        # 构建上下文
-        context_parts = ["=== 相关实体 ==="]
-        for name, score in top_entities:
+        # 构建上下文 (带编号)
+        context_parts = ["=== Entities ==="]
+        for idx, (name, score) in enumerate(top_entities):
             data = self.entities[name]
-            context_parts.append(f"- {name} ({data['type']}): {data['description']}")
+            context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
         
         # 获取相关关系
         top_entity_names = {e[0] for e in top_entities}
@@ -412,11 +437,11 @@ class GraphRAGLite:
                 related_relations.append(key)
         
         if related_relations:
-            context_parts.append("\n=== 相关关系 ===")
-            for key in related_relations[:top_k]:
+            context_parts.append("\n=== Relationships ===")
+            for idx, key in enumerate(related_relations[:top_k]):
                 src, tgt = key.split("||")
                 data = self.relations[key]
-                context_parts.append(f"- {src} -> {tgt}: {data['description']}")
+                context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
         
         return "\n".join(context_parts)
 
@@ -435,12 +460,12 @@ class GraphRAGLite:
         
         top_relations = top_k_similar(query_emb, valid_keys, valid_vecs, top_k)
         
-        # 构建上下文
-        context_parts = ["=== 相关关系 ==="]
-        for key, score in top_relations:
+        # 构建上下文 (带编号)
+        context_parts = ["=== Relationships ==="]
+        for idx, (key, score) in enumerate(top_relations):
             src, tgt = key.split("||")
             data = self.relations[key]
-            context_parts.append(f"- {src} -> {tgt}: {data['description']}")
+            context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
         
         # 获取涉及的实体
         involved_entities = set()
@@ -450,11 +475,11 @@ class GraphRAGLite:
             involved_entities.add(tgt)
         
         if involved_entities:
-            context_parts.append("\n=== 涉及实体 ===")
-            for name in involved_entities:
+            context_parts.append("\n=== Entities ===")
+            for idx, name in enumerate(involved_entities):
                 if name in self.entities:
                     data = self.entities[name]
-                    context_parts.append(f"- {name} ({data['type']}): {data['description']}")
+                    context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
         
         return "\n".join(context_parts)
 
@@ -474,11 +499,11 @@ class GraphRAGLite:
             top_entities = top_k_similar(query_emb, valid_entity_keys, valid_entity_vecs, third_k)
             
             if top_entities:
-                context_parts.append("=== 相关实体 ===")
-                for name, _ in top_entities:
+                context_parts.append("=== Entities ===")
+                for idx, (name, _) in enumerate(top_entities):
                     if name in self.entities:
                         data = self.entities[name]
-                        context_parts.append(f"- {name} ({data['type']}): {data['description']}")
+                        context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
         
         # 2. 检索关系
         if self.relations:
@@ -489,12 +514,12 @@ class GraphRAGLite:
             top_relations = top_k_similar(query_emb, valid_relation_keys, valid_relation_vecs, third_k)
             
             if top_relations:
-                context_parts.append("\n=== 相关关系 ===")
-                for key, _ in top_relations:
+                context_parts.append("\n=== Relationships ===")
+                for idx, (key, _) in enumerate(top_relations):
                     if key in self.relations:
                         src, tgt = key.split("||")
                         data = self.relations[key]
-                        context_parts.append(f"- {src} -> {tgt}: {data['description']}")
+                        context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
         
         # 3. 检索原始文本块
         if self.chunks:
@@ -505,14 +530,14 @@ class GraphRAGLite:
             top_chunks = top_k_similar(query_emb, valid_chunk_keys, valid_chunk_vecs, third_k)
             
             if top_chunks:
-                context_parts.append("\n=== 相关文本 ===")
-                for chunk_id, _ in top_chunks:
+                context_parts.append("\n=== Sources ===")
+                for idx, (chunk_id, _) in enumerate(top_chunks):
                     if chunk_id in self.chunks:
                         content = self.chunks[chunk_id]["content"]
                         # 截取前 500 字符避免过长
                         if len(content) > 500:
                             content = content[:500] + "..."
-                        context_parts.append(f"- {content}")
+                        context_parts.append(f"({idx}) {content}")
         
         return "\n".join(context_parts)
 
@@ -530,11 +555,11 @@ class GraphRAGLite:
         
         top_chunks = top_k_similar(query_emb, valid_chunk_keys, valid_chunk_vecs, top_k)
         
-        context_parts = ["=== 相关文本 ==="]
-        for chunk_id, _ in top_chunks:
+        context_parts = ["=== Sources ==="]
+        for idx, (chunk_id, _) in enumerate(top_chunks):
             if chunk_id in self.chunks:
                 content = self.chunks[chunk_id]["content"]
-                context_parts.append(f"- {content}")
+                context_parts.append(f"({idx}) {content}")
         
         return "\n".join(context_parts)
 
@@ -643,3 +668,481 @@ class GraphRAGLite:
                 p.unlink()
         
         logger.info("[Clear] 数据已清空")
+
+    # ==================== 异步方法 ====================
+    
+    async def _acall_llm(self, prompt: str, use_cache: bool = True) -> str:
+        """异步调用 LLM (带缓存)"""
+        if use_cache and self.enable_cache:
+            cache_key = hashlib.md5(prompt.encode()).hexdigest()
+            if cache_key in self._llm_cache:
+                logger.debug("[Cache Hit] LLM 响应")
+                return self._llm_cache[cache_key]
+        
+        response = await self.async_client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        result = response.choices[0].message.content
+        
+        if use_cache and self.enable_cache:
+            self._llm_cache[cache_key] = result
+        
+        return result
+
+    async def _acall_llm_stream(self, prompt: str) -> AsyncGenerator[str, None]:
+        """异步流式调用 LLM"""
+        response = await self.async_client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            stream=True,
+        )
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                yield chunk.choices[0].delta.content
+
+    async def _aget_embedding(self, text: str) -> list[float]:
+        """异步获取单个文本 embedding"""
+        response = await self.async_client.embeddings.create(
+            model=self.embedding_model,
+            input=text,
+        )
+        return response.data[0].embedding
+
+    async def _aget_embeddings_batch(self, texts: list[str], show_progress: bool = False, desc: str = "Embeddings") -> list[list[float]]:
+        """异步批量获取 embedding"""
+        if not texts:
+            return []
+        
+        from tqdm import tqdm
+        
+        MAX_TOKENS = 8000
+        all_embeddings = []
+        batch = []
+        batch_tokens = 0
+        pbar = tqdm(total=len(texts), desc=desc, disable=not show_progress)
+        
+        async def flush():
+            nonlocal batch, batch_tokens, all_embeddings
+            if not batch:
+                return
+            resp = await self.async_client.embeddings.create(
+                model=self.embedding_model,
+                input=batch,
+            )
+            all_embeddings.extend([d.embedding for d in resp.data])
+            pbar.update(len(batch))
+            batch = []
+            batch_tokens = 0
+        
+        for text in texts:
+            t = count_tokens(text, self.embedding_model)
+            if batch_tokens + t > MAX_TOKENS:
+                await flush()
+            batch.append(text)
+            batch_tokens += t
+        
+        await flush()
+        pbar.close()
+        return all_embeddings
+
+    async def _aextract_entities_relations(self, text: str) -> tuple[list[dict], list[dict]]:
+        """异步从文本提取实体和关系"""
+        prompt = ENTITY_EXTRACTION_PROMPT.format(text=text)
+        result = await self._acall_llm(prompt)
+        
+        entities = []
+        relations = []
+        
+        for line in result.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            
+            if line.startswith("- "):
+                line = line[2:]
+            
+            is_entity = line.lower().startswith("entity:")
+            is_relation = line.lower().startswith("relation:")
+            
+            if is_entity:
+                line = line[7:].strip()
+            elif is_relation:
+                line = line[9:].strip()
+            
+            parts = line.split("||")
+            if len(parts) < 4:
+                continue
+            
+            tag = parts[0].strip().lower()
+            
+            if is_entity or tag in ("entity", "实体"):
+                if is_entity and tag not in ("entity", "实体"):
+                    entities.append({
+                        "name": parts[1].strip(),
+                        "type": parts[0].strip(),
+                        "description": parts[3].strip() if len(parts) > 3 else parts[2].strip(),
+                    })
+                else:
+                    entities.append({
+                        "name": parts[1].strip(),
+                        "type": parts[2].strip(),
+                        "description": parts[3].strip(),
+                    })
+            elif is_relation or tag in ("relation", "关系"):
+                if len(parts) >= 5:
+                    relations.append({
+                        "src": parts[1].strip(),
+                        "tgt": parts[2].strip(),
+                        "keywords": parts[3].strip(),
+                        "description": parts[4].strip(),
+                    })
+        
+        return entities, relations
+
+    async def _amerge_entities_batch(self, entities: list[dict], show_progress: bool = False) -> None:
+        """异步批量合并实体"""
+        if not entities:
+            return
+        
+        MAX_DESC_TOKENS = 2000
+        
+        grouped = {}
+        for e in entities:
+            name = e["name"]
+            if name not in grouped:
+                grouped[name] = {"type": e["type"], "descriptions": []}
+            grouped[name]["descriptions"].append(e["description"])
+        
+        names = []
+        texts = []
+        
+        for name, data in grouped.items():
+            if name in self.entities:
+                existing_desc = self.entities[name]["description"]
+                new_desc = " ".join(data["descriptions"])
+                merged_desc = f"{existing_desc} {new_desc}"
+            else:
+                merged_desc = " ".join(data["descriptions"])
+            
+            # 截断过长描述
+            merged_desc = truncate_text(merged_desc, MAX_DESC_TOKENS, self.embedding_model)
+            
+            self.entities[name] = {
+                "type": data["type"],
+                "description": merged_desc,
+            }
+            
+            names.append(name)
+            texts.append(f"{name}: {merged_desc}")
+        
+        embs = await self._aget_embeddings_batch(texts, show_progress=show_progress, desc="实体 Embeddings")
+        for name, emb in zip(names, embs):
+            self.embeddings[f"entity:{name}"] = emb
+
+    async def _amerge_relations_batch(self, relations: list[dict], show_progress: bool = False) -> None:
+        """异步批量合并关系"""
+        if not relations:
+            return
+        
+        MAX_DESC_TOKENS = 2000
+        
+        grouped = {}
+        for r in relations:
+            key = f"{r['src']}||{r['tgt']}"
+            if key not in grouped:
+                grouped[key] = {"keywords": set(), "descriptions": []}
+            grouped[key]["keywords"].update(r["keywords"].split())
+            grouped[key]["descriptions"].append(r["description"])
+        
+        keys = []
+        texts = []
+        
+        for key, data in grouped.items():
+            if key in self.relations:
+                existing = self.relations[key]
+                keywords = existing["keywords"] + " " + " ".join(data["keywords"])
+                description = existing["description"] + " " + " ".join(data["descriptions"])
+            else:
+                keywords = " ".join(data["keywords"])
+                description = " ".join(data["descriptions"])
+            
+            # 截断过长描述
+            description = truncate_text(description, MAX_DESC_TOKENS, self.embedding_model)
+            
+            self.relations[key] = {
+                "keywords": keywords,
+                "description": description,
+            }
+            
+            keys.append(key)
+            texts.append(f"{key}: {description}")
+        
+        embs = await self._aget_embeddings_batch(texts, show_progress=show_progress, desc="关系 Embeddings")
+        for key, emb in zip(keys, embs):
+            self.embeddings[f"relation:{key}"] = emb
+
+    async def ainsert(self, text: str, doc_id: str = None, show_progress: bool = True) -> dict:
+        """
+        异步插入文档
+        
+        Args:
+            text: 文档文本
+            doc_id: 文档ID (可选, 默认用 MD5)
+            show_progress: 是否显示进度条
+        
+        Returns:
+            {"doc_id": str, "chunks": int, "entities": int, "relations": int}
+        """
+        from tqdm.asyncio import tqdm as atqdm
+        from tqdm import tqdm
+        
+        if doc_id is None:
+            doc_id = hashlib.md5(text.encode()).hexdigest()[:16]
+        
+        # 1. 分块
+        chunks = chunk_text(text)
+        logger.info(f"[Async Insert] 文档 {doc_id} 分块: {len(chunks)} 块")
+        
+        # 2. 异步批量获取 chunk embeddings (带进度条)
+        chunk_texts = [c["content"] for c in chunks]
+        if show_progress:
+            logger.info("[Step 1/4] 获取文本 Embeddings...")
+        chunk_embs = await self._aget_embeddings_batch(chunk_texts, show_progress=show_progress, desc="Chunk Embeddings")
+        
+        # 3. 并发处理每个 chunk 的实体关系提取
+        all_entities = []
+        all_relations = []
+        
+        if show_progress:
+            logger.info("[Step 2/4] 提取实体和关系...")
+            pbar = tqdm(total=len(chunks), desc="提取实体关系")
+        
+        async def process_chunk(chunk, emb, idx):
+            chunk_id = f"{doc_id}_chunk_{chunk['index']}"
+            self.chunks[chunk_id] = {
+                "content": chunk["content"],
+                "doc_id": doc_id,
+            }
+            self.embeddings[f"chunk:{chunk_id}"] = emb
+            result = await self._aextract_entities_relations(chunk["content"])
+            if show_progress:
+                pbar.update(1)
+            return result
+        
+        # 并发提取实体关系
+        tasks = [process_chunk(chunk, emb, idx) for idx, (chunk, emb) in enumerate(zip(chunks, chunk_embs))]
+        results = await asyncio.gather(*tasks)
+        
+        if show_progress:
+            pbar.close()
+        
+        for entities, relations in results:
+            all_entities.extend(entities)
+            all_relations.extend(relations)
+        
+        # 4. 异步批量合并实体和关系
+        if show_progress:
+            logger.info(f"[Step 3/4] 合并实体 ({len(all_entities)} 个)...")
+        await self._amerge_entities_batch(all_entities, show_progress=show_progress)
+        
+        if show_progress:
+            logger.info(f"[Step 4/4] 合并关系 ({len(all_relations)} 个)...")
+        await self._amerge_relations_batch(all_relations, show_progress=show_progress)
+        
+        # 5. 保存
+        self.save()
+        
+        return {
+            "doc_id": doc_id,
+            "chunks": len(chunks),
+            "entities": len(all_entities),
+            "relations": len(all_relations),
+        }
+
+    async def aquery(
+        self, 
+        question: str, 
+        mode: str = "mix", 
+        top_k: int = 10,
+        stream: bool = False,
+    ) -> str | AsyncGenerator[str, None]:
+        """
+        异步查询
+        
+        Args:
+            question: 用户问题
+            mode: "local" / "global" / "mix" / "naive"
+            top_k: 检索数量
+            stream: 是否流式输出
+        
+        Returns:
+            str 或 AsyncGenerator (stream=True)
+        """
+        # 1. 根据模式检索 (检索部分使用异步 embedding)
+        query_emb = await self._aget_embedding(question)
+        
+        if mode == "local":
+            context = self._local_search_with_emb(query_emb, top_k)
+        elif mode == "global":
+            context = self._global_search_with_emb(query_emb, top_k)
+        elif mode == "mix":
+            context = self._mix_search_with_emb(query_emb, top_k)
+        elif mode == "naive":
+            context = self._naive_search_with_emb(query_emb, top_k)
+        else:
+            raise ValueError(f"不支持的模式: {mode}, 请使用 local / global / mix / naive")
+        
+        if not context:
+            return "未找到相关知识，无法回答。"
+        
+        # 2. 生成回答
+        prompt = RAG_RESPONSE_PROMPT.format(context=context, query=question)
+        
+        if stream:
+            logger.debug(f"[Stream] 开始流式生成回答, prompt={prompt}")
+            return self._acall_llm_stream(prompt)
+        else:
+            return await self._acall_llm(prompt, use_cache=False)
+
+    def _local_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Local 搜索 (使用预计算的 embedding)"""
+        if not self.entities:
+            return ""
+        
+        entity_keys = list(self.entities.keys())
+        entity_vecs = [self.embeddings.get(f"entity:{k}", []) for k in entity_keys]
+        valid_keys = [k for k, v in zip(entity_keys, entity_vecs) if v]
+        valid_vecs = [v for v in entity_vecs if v]
+        
+        top_entities = top_k_similar(query_emb, valid_keys, valid_vecs, top_k)
+        
+        context_parts = ["=== Entities ==="]
+        for idx, (name, score) in enumerate(top_entities):
+            data = self.entities[name]
+            context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
+        
+        top_entity_names = {e[0] for e in top_entities}
+        related_relations = []
+        for key in self.relations:
+            src, tgt = key.split("||")
+            if src in top_entity_names or tgt in top_entity_names:
+                related_relations.append(key)
+        
+        if related_relations:
+            context_parts.append("\n=== Relationships ===")
+            for idx, key in enumerate(related_relations[:top_k]):
+                src, tgt = key.split("||")
+                data = self.relations[key]
+                context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
+        
+        return "\n".join(context_parts)
+
+    def _global_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Global 搜索 (使用预计算的 embedding)"""
+        if not self.relations:
+            return ""
+        
+        relation_keys = list(self.relations.keys())
+        relation_vecs = [self.embeddings.get(f"relation:{k}", []) for k in relation_keys]
+        valid_keys = [k for k, v in zip(relation_keys, relation_vecs) if v]
+        valid_vecs = [v for v in relation_vecs if v]
+        
+        top_relations = top_k_similar(query_emb, valid_keys, valid_vecs, top_k)
+        
+        context_parts = ["=== Relationships ==="]
+        for idx, (key, score) in enumerate(top_relations):
+            src, tgt = key.split("||")
+            data = self.relations[key]
+            context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
+        
+        involved_entities = set()
+        for key, _ in top_relations:
+            src, tgt = key.split("||")
+            involved_entities.add(src)
+            involved_entities.add(tgt)
+        
+        if involved_entities:
+            context_parts.append("\n=== Entities ===")
+            for idx, name in enumerate(involved_entities):
+                if name in self.entities:
+                    data = self.entities[name]
+                    context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
+        
+        return "\n".join(context_parts)
+        
+        return "\n".join(context_parts)
+
+    def _mix_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Mix 搜索 (使用预计算的 embedding)"""
+        third_k = max(1, top_k // 3)
+        context_parts = []
+        
+        if self.entities:
+            entity_keys = list(self.entities.keys())
+            entity_vecs = [self.embeddings.get(f"entity:{k}", []) for k in entity_keys]
+            valid_entity_keys = [k for k, v in zip(entity_keys, entity_vecs) if v]
+            valid_entity_vecs = [v for v in entity_vecs if v]
+            top_entities = top_k_similar(query_emb, valid_entity_keys, valid_entity_vecs, third_k)
+            
+            if top_entities:
+                context_parts.append("=== Entities ===")
+                for idx, (name, _) in enumerate(top_entities):
+                    if name in self.entities:
+                        data = self.entities[name]
+                        context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
+        
+        if self.relations:
+            relation_keys = list(self.relations.keys())
+            relation_vecs = [self.embeddings.get(f"relation:{k}", []) for k in relation_keys]
+            valid_relation_keys = [k for k, v in zip(relation_keys, relation_vecs) if v]
+            valid_relation_vecs = [v for v in relation_vecs if v]
+            top_relations = top_k_similar(query_emb, valid_relation_keys, valid_relation_vecs, third_k)
+            
+            if top_relations:
+                context_parts.append("\n=== Relationships ===")
+                for idx, (key, _) in enumerate(top_relations):
+                    if key in self.relations:
+                        src, tgt = key.split("||")
+                        data = self.relations[key]
+                        context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
+        
+        if self.chunks:
+            chunk_keys = list(self.chunks.keys())
+            chunk_vecs = [self.embeddings.get(f"chunk:{k}", []) for k in chunk_keys]
+            valid_chunk_keys = [k for k, v in zip(chunk_keys, chunk_vecs) if v]
+            valid_chunk_vecs = [v for v in chunk_vecs if v]
+            top_chunks = top_k_similar(query_emb, valid_chunk_keys, valid_chunk_vecs, third_k)
+            
+            if top_chunks:
+                context_parts.append("\n=== Sources ===")
+                for idx, (chunk_id, _) in enumerate(top_chunks):
+                    if chunk_id in self.chunks:
+                        content = self.chunks[chunk_id]["content"]
+                        if len(content) > 500:
+                            content = content[:500] + "..."
+                        context_parts.append(f"({idx}) {content}")
+        
+        return "\n".join(context_parts)
+
+    def _naive_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Naive 搜索 (使用预计算的 embedding)"""
+        if not self.chunks:
+            return ""
+        
+        chunk_keys = list(self.chunks.keys())
+        chunk_vecs = [self.embeddings.get(f"chunk:{k}", []) for k in chunk_keys]
+        valid_chunk_keys = [k for k, v in zip(chunk_keys, chunk_vecs) if v]
+        valid_chunk_vecs = [v for v in chunk_vecs if v]
+        
+        top_chunks = top_k_similar(query_emb, valid_chunk_keys, valid_chunk_vecs, top_k)
+        
+        context_parts = ["=== Sources ==="]
+        for idx, (chunk_id, _) in enumerate(top_chunks):
+            if chunk_id in self.chunks:
+                content = self.chunks[chunk_id]["content"]
+                context_parts.append(f"({idx}) {content}")
+        
+        return "\n".join(context_parts)
