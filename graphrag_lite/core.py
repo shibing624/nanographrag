@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Generator, AsyncGenerator
 from openai import OpenAI, AsyncOpenAI
 from loguru import logger
+from tqdm import tqdm
 
 from .prompts import ENTITY_EXTRACTION_PROMPT, RAG_RESPONSE_PROMPT
 from .utils import chunk_text, top_k_similar, count_tokens, truncate_text
@@ -90,7 +91,7 @@ class GraphRAGLite:
         if use_cache and self.enable_cache:
             cache_key = hashlib.md5(prompt.encode()).hexdigest()
             if cache_key in self._llm_cache:
-                logger.debug("[Cache Hit] LLM 响应")
+                # logger.debug("[Cache Hit] LLM 响应")
                 return self._llm_cache[cache_key]
         
         response = self.client.chat.completions.create(
@@ -175,7 +176,7 @@ class GraphRAGLite:
         
         # 1. 分块
         chunks = chunk_text(text)
-        logger.info(f"[Insert] 文档 {doc_id} 分块: {len(chunks)} 块")
+        logger.info(f"[Insert] Doc_id: {doc_id}, Chunks size: {len(chunks)}")
         
         # 2. 批量获取 chunk embeddings
         chunk_texts = [c["content"] for c in chunks]
@@ -386,13 +387,13 @@ class GraphRAGLite:
         """
         # 1. 根据模式检索
         if mode == "local":
-            context = self._local_search(question, top_k)
+            context = self.local_search(question, top_k)
         elif mode == "global":
-            context = self._global_search(question, top_k)
+            context = self.global_search(question, top_k)
         elif mode == "mix":
-            context = self._mix_search(question, top_k)
+            context = self.mix_search(question, top_k)
         elif mode == "naive":
-            context = self._naive_search(question, top_k)
+            context = self.naive_search(question, top_k)
         else:
             raise ValueError(f"不支持的模式: {mode}, 请使用 local / global / mix / naive")
         
@@ -407,8 +408,8 @@ class GraphRAGLite:
         else:
             return self._call_llm(prompt, use_cache=False)
 
-    def _local_search(self, query: str, top_k: int) -> str:
-        """Local 搜索: 从实体出发"""
+    def local_search(self, query: str, top_k: int) -> str:
+        """Local 搜索: 从实体出发，检索实体 + 邻居关系"""
         if not self.entities:
             return ""
         
@@ -445,8 +446,8 @@ class GraphRAGLite:
         
         return "\n".join(context_parts)
 
-    def _global_search(self, query: str, top_k: int) -> str:
-        """Global 搜索: 从关系出发"""
+    def global_search(self, query: str, top_k: int) -> str:
+        """Global 搜索: 从关系出发，检索关系 + 涉及实体"""
         if not self.relations:
             return ""
         
@@ -483,8 +484,8 @@ class GraphRAGLite:
         
         return "\n".join(context_parts)
 
-    def _mix_search(self, query: str, top_k: int) -> str:
-        """Mix 搜索: 实体 + 关系 + 原始文本块"""
+    def mix_search(self, query: str, top_k: int) -> str:
+        """Mix 搜索: 实体 + 关系 + 原始文本块 (推荐)"""
         query_emb = self._get_embedding(query)
         third_k = max(1, top_k // 3)
         
@@ -534,15 +535,14 @@ class GraphRAGLite:
                 for idx, (chunk_id, _) in enumerate(top_chunks):
                     if chunk_id in self.chunks:
                         content = self.chunks[chunk_id]["content"]
-                        # 截取前 500 字符避免过长
-                        if len(content) > 500:
-                            content = content[:500] + "..."
+                        if len(content) > 1000:
+                            content = content[:1000] + "..."
                         context_parts.append(f"({idx}) {content}")
         
         return "\n".join(context_parts)
 
-    def _naive_search(self, query: str, top_k: int) -> str:
-        """Naive 搜索: 仅原始文本块检索 (传统 RAG)"""
+    def naive_search(self, query: str, top_k: int) -> str:
+        """Naive 搜索: 仅原始文本块检索 (传统 RAG baseline)"""
         if not self.chunks:
             return ""
         
@@ -589,7 +589,8 @@ class GraphRAGLite:
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump(self._llm_cache, f, ensure_ascii=False)
         
-        logger.info(f"[Save] 数据已保存到 {self.storage_path}")
+        abs_storage_path = str(self.storage_path.resolve())
+        logger.info(f"[Save] Graph data saved: {abs_storage_path}")
 
     def load(self) -> None:
         """加载数据"""
@@ -604,7 +605,7 @@ class GraphRAGLite:
             self.chunks = data.get("chunks", {})
             self.entities = data.get("entities", {})
             self.relations = data.get("relations", {})
-            logger.info(f"[Load] 图数据: {len(self.chunks)} chunks, {len(self.entities)} entities, {len(self.relations)} relations")
+            logger.info(f"[Load] Graph data: {len(self.chunks)} chunks, {len(self.entities)} entities, {len(self.relations)} relations")
         
         # Embeddings
         if emb_path.exists():
@@ -620,7 +621,7 @@ class GraphRAGLite:
         if self.enable_cache and cache_path.exists():
             with open(cache_path, "r", encoding="utf-8") as f:
                 self._llm_cache = json.load(f)
-            logger.info(f"[Load] LLM 缓存: {len(self._llm_cache)}")
+            logger.info(f"[Load] LLM Cache: {len(self._llm_cache)}")
 
     # ==================== 辅助方法 ====================
     
@@ -715,8 +716,6 @@ class GraphRAGLite:
         """异步批量获取 embedding"""
         if not texts:
             return []
-        
-        from tqdm import tqdm
         
         MAX_TOKENS = 8000
         all_embeddings = []
@@ -838,7 +837,7 @@ class GraphRAGLite:
             names.append(name)
             texts.append(f"{name}: {merged_desc}")
         
-        embs = await self._aget_embeddings_batch(texts, show_progress=show_progress, desc="实体 Embeddings")
+        embs = await self._aget_embeddings_batch(texts, show_progress=show_progress, desc="Entity Embeddings")
         for name, emb in zip(names, embs):
             self.embeddings[f"entity:{name}"] = emb
 
@@ -880,7 +879,7 @@ class GraphRAGLite:
             keys.append(key)
             texts.append(f"{key}: {description}")
         
-        embs = await self._aget_embeddings_batch(texts, show_progress=show_progress, desc="关系 Embeddings")
+        embs = await self._aget_embeddings_batch(texts, show_progress=show_progress, desc="Relation Embeddings")
         for key, emb in zip(keys, embs):
             self.embeddings[f"relation:{key}"] = emb
 
@@ -896,9 +895,6 @@ class GraphRAGLite:
         Returns:
             {"doc_id": str, "chunks": int, "entities": int, "relations": int}
         """
-        from tqdm.asyncio import tqdm as atqdm
-        from tqdm import tqdm
-        
         if doc_id is None:
             doc_id = hashlib.md5(text.encode()).hexdigest()[:16]
         
@@ -918,7 +914,7 @@ class GraphRAGLite:
         
         if show_progress:
             logger.info("[Step 2/4] 提取实体和关系...")
-            pbar = tqdm(total=len(chunks), desc="提取实体关系")
+            pbar = tqdm(total=len(chunks), desc="Extracting Entities")
         
         async def process_chunk(chunk, emb, idx):
             chunk_id = f"{doc_id}_chunk_{chunk['index']}"
@@ -985,13 +981,13 @@ class GraphRAGLite:
         query_emb = await self._aget_embedding(question)
         
         if mode == "local":
-            context = self._local_search_with_emb(query_emb, top_k)
+            context = self.local_search_with_emb(query_emb, top_k)
         elif mode == "global":
-            context = self._global_search_with_emb(query_emb, top_k)
+            context = self.global_search_with_emb(query_emb, top_k)
         elif mode == "mix":
-            context = self._mix_search_with_emb(query_emb, top_k)
+            context = self.mix_search_with_emb(query_emb, top_k)
         elif mode == "naive":
-            context = self._naive_search_with_emb(query_emb, top_k)
+            context = self.naive_search_with_emb(query_emb, top_k)
         else:
             raise ValueError(f"不支持的模式: {mode}, 请使用 local / global / mix / naive")
         
@@ -1007,8 +1003,8 @@ class GraphRAGLite:
         else:
             return await self._acall_llm(prompt, use_cache=False)
 
-    def _local_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Local 搜索 (使用预计算的 embedding)"""
+    def local_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Local 搜索 (使用预计算的 embedding)，从实体出发"""
         if not self.entities:
             return ""
         
@@ -1040,8 +1036,8 @@ class GraphRAGLite:
         
         return "\n".join(context_parts)
 
-    def _global_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Global 搜索 (使用预计算的 embedding)"""
+    def global_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Global 搜索 (使用预计算的 embedding)，从关系出发"""
         if not self.relations:
             return ""
         
@@ -1072,11 +1068,9 @@ class GraphRAGLite:
                     context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
         
         return "\n".join(context_parts)
-        
-        return "\n".join(context_parts)
 
-    def _mix_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Mix 搜索 (使用预计算的 embedding)"""
+    def mix_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Mix 搜索 (使用预计算的 embedding)，实体 + 关系 + 文本块"""
         third_k = max(1, top_k // 3)
         context_parts = []
         
@@ -1121,14 +1115,14 @@ class GraphRAGLite:
                 for idx, (chunk_id, _) in enumerate(top_chunks):
                     if chunk_id in self.chunks:
                         content = self.chunks[chunk_id]["content"]
-                        if len(content) > 500:
-                            content = content[:500] + "..."
+                        if len(content) > 1000:
+                            content = content[:1000] + "..."
                         context_parts.append(f"({idx}) {content}")
         
         return "\n".join(context_parts)
 
-    def _naive_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Naive 搜索 (使用预计算的 embedding)"""
+    def naive_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
+        """Naive 搜索 (使用预计算的 embedding)，仅文本块"""
         if not self.chunks:
             return ""
         

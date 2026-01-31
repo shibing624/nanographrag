@@ -25,7 +25,6 @@ GraphRAG-Lite 是一个轻量、教学导向的 GraphRAG（基于图的检索增
 - **生产级模式**：批量 Embedding、LLM 缓存等真实优化
 - **同步/异步双模式**：支持同步和异步 API，适配不同场景
 - **知识溯源**：回答自动引用知识图谱来源，增强可信度
-- **灵活检索**：4 种查询模式适应不同场景
 - **依赖精简**：仅需 `openai`、`numpy`、`tiktoken`、`loguru`、`tqdm`
 
 ## 特性
@@ -36,10 +35,7 @@ GraphRAG-Lite 是一个轻量、教学导向的 GraphRAG（基于图的检索增
 | **同步/异步 API** | `insert`/`ainsert`、`query`/`aquery` 双模式支持 |
 | **知识溯源** | 回答带 `[Data: Entities (X); Relationships (Y)]` 引用 |
 | **批量 Embedding** | 智能批处理减少 API 调用 |
-| **LLM 缓存** | 避免重复的 LLM 请求 |
 | **流式输出** | 实时响应流（同步/异步均支持） |
-| **进度条显示** | 大文档处理时显示进度 |
-| **NumPy 加速** | 快速向量相似度搜索 |
 | **持久化存储** | 基于 JSON 存储，无需外部数据库 |
 
 ## 安装
@@ -215,7 +211,7 @@ Apache License 2.0
 @software{graphrag-lite,
   author = {Xu Ming},
   title = {GraphRAG-Lite: Lightweight GraphRAG Implementation},
-  year = {2025},
+  year = {2026},
   url = {https://github.com/shibing624/graphrag-lite}
 }
 ```

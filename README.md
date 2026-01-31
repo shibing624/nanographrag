@@ -215,7 +215,7 @@ Apache License 2.0
 @software{graphrag-lite,
   author = {Xu Ming},
   title = {GraphRAG-Lite: Lightweight GraphRAG Implementation},
-  year = {2025},
+  year = {2026},
   url = {https://github.com/shibing624/graphrag-lite}
 }
 ```
