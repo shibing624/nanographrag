@@ -32,8 +32,8 @@ RAG_RESPONSE_PROMPT = """基于检索到的知识图谱信息回答问题。
 
 === 回答要求 ===
 1. 严格基于提供的知识图谱数据回答，不要编造信息
-2. 使用 Markdown 格式组织回答，包含适当的标题和分点
-3. **重要**: 在回答中引用数据来源，格式为 [Data: Entities (编号); Relationships (编号); Sources (编号)]
+2. 使用 Markdown 格式回答
+3. 在回答中引用数据来源(如果有），格式为 [Entities (编号); Relationships (编号); Sources (编号)]
    - Entities 对应实体编号
    - Relationships 对应关系编号  
    - Sources 对应文本来源编号

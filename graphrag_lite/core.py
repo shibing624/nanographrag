@@ -25,6 +25,7 @@
 import json
 import hashlib
 import asyncio
+import time
 from pathlib import Path
 from typing import Generator, AsyncGenerator
 from openai import OpenAI, AsyncOpenAI
@@ -34,6 +35,10 @@ from tqdm import tqdm
 from .prompts import ENTITY_EXTRACTION_PROMPT, RAG_RESPONSE_PROMPT
 from .utils import chunk_text, top_k_similar, count_tokens, truncate_text
 
+# Embedding API 重试配置
+EMB_MAX_RETRIES = 3
+EMB_RETRY_DELAY = 1.0  # 秒
+
 
 class GraphRAGLite:
     def __init__(
@@ -41,7 +46,7 @@ class GraphRAGLite:
         storage_path: str = "./graphrag_storage",
         api_key: str = None,
         base_url: str = None,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-4o",
         embedding_model: str = "text-embedding-3-small",
         enable_cache: bool = True,
     ):
@@ -91,7 +96,6 @@ class GraphRAGLite:
         if use_cache and self.enable_cache:
             cache_key = hashlib.md5(prompt.encode()).hexdigest()
             if cache_key in self._llm_cache:
-                # logger.debug("[Cache Hit] LLM 响应")
                 return self._llm_cache[cache_key]
         
         response = self.client.chat.completions.create(
@@ -119,15 +123,17 @@ class GraphRAGLite:
                 yield chunk.choices[0].delta.content
 
     def _get_embedding(self, text: str) -> list[float]:
-        """获取单个文本 embedding"""
-        response = self.client.embeddings.create(
-            model=self.embedding_model,
-            input=text,
-        )
-        return response.data[0].embedding
+        """获取单条 embedding (带缓存，用于 query)"""
+        cache_key = f"query:{hashlib.md5(text.encode()).hexdigest()}"
+        if cache_key in self.embeddings:
+            return self.embeddings[cache_key]
+        
+        emb = self._get_embeddings_batch([text])[0]
+        self.embeddings[cache_key] = emb
+        return emb
 
     def _get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """批量获取 embedding (减少 API 调用)"""
+        """批量获取 embedding (减少 API 调用，带重试)"""
         if not texts:
             return []
         
@@ -140,11 +146,23 @@ class GraphRAGLite:
             nonlocal batch, batch_tokens, all_embeddings
             if not batch:
                 return
-            resp = self.client.embeddings.create(
-                model=self.embedding_model,
-                input=batch,
-            )
-            all_embeddings.extend([d.embedding for d in resp.data])
+            
+            # 重试逻辑
+            for attempt in range(EMB_MAX_RETRIES):
+                try:
+                    resp = self.client.embeddings.create(
+                        model=self.embedding_model,
+                        input=batch,
+                    )
+                    all_embeddings.extend([d.embedding for d in resp.data])
+                    break
+                except Exception as e:
+                    if attempt < EMB_MAX_RETRIES - 1:
+                        logger.warning(f"[Embedding] 第 {attempt + 1} 次失败，{EMB_RETRY_DELAY}s 后重试: {e}")
+                        time.sleep(EMB_RETRY_DELAY)
+                    else:
+                        raise
+            
             batch = []
             batch_tokens = 0
         
@@ -404,24 +422,32 @@ class GraphRAGLite:
         prompt = RAG_RESPONSE_PROMPT.format(context=context, query=question)
         
         if stream:
+            logger.debug(f"prompt: {prompt}")
             return self._call_llm_stream(prompt)
         else:
             return self._call_llm(prompt, use_cache=False)
 
-    def local_search(self, query: str, top_k: int) -> str:
-        """Local 搜索: 从实体出发，检索实体 + 邻居关系"""
+    def local_search(self, query: str, top_k: int, query_emb: list[float] = None) -> str:
+        """Local 搜索: 从实体出发，检索实体 + 邻居关系
+        
+        Args:
+            query: 查询文本
+            top_k: 检索数量
+            query_emb: 预计算的 query embedding (可选，用于异步场景)
+        """
         if not self.entities:
             return ""
         
-        query_emb = self._get_embedding(query)
+        if query_emb is None:
+            query_emb = self._get_embedding(query)
         
         # 批量检索实体 (NumPy 加速)
         entity_keys = list(self.entities.keys())
         entity_vecs = [self.embeddings.get(f"entity:{k}", []) for k in entity_keys]
-        entity_vecs = [v for v in entity_vecs if v]  # 过滤空向量
-        valid_keys = [k for k, v in zip(entity_keys, [self.embeddings.get(f"entity:{k}") for k in entity_keys]) if v]
+        valid_keys = [k for k, v in zip(entity_keys, entity_vecs) if v]
+        valid_vecs = [v for v in entity_vecs if v]
         
-        top_entities = top_k_similar(query_emb, valid_keys, entity_vecs, top_k)
+        top_entities = top_k_similar(query_emb, valid_keys, valid_vecs, top_k)
         
         # 构建上下文 (带编号)
         context_parts = ["=== Entities ==="]
@@ -446,12 +472,19 @@ class GraphRAGLite:
         
         return "\n".join(context_parts)
 
-    def global_search(self, query: str, top_k: int) -> str:
-        """Global 搜索: 从关系出发，检索关系 + 涉及实体"""
+    def global_search(self, query: str, top_k: int, query_emb: list[float] = None) -> str:
+        """Global 搜索: 从关系出发，检索关系 + 涉及实体
+        
+        Args:
+            query: 查询文本
+            top_k: 检索数量
+            query_emb: 预计算的 query embedding (可选，用于异步场景)
+        """
         if not self.relations:
             return ""
         
-        query_emb = self._get_embedding(query)
+        if query_emb is None:
+            query_emb = self._get_embedding(query)
         
         # 批量检索关系
         relation_keys = list(self.relations.keys())
@@ -484,11 +517,18 @@ class GraphRAGLite:
         
         return "\n".join(context_parts)
 
-    def mix_search(self, query: str, top_k: int) -> str:
-        """Mix 搜索: 实体 + 关系 + 原始文本块 (推荐)"""
-        query_emb = self._get_embedding(query)
-        third_k = max(1, top_k // 3)
+    def mix_search(self, query: str, top_k: int, query_emb: list[float] = None) -> str:
+        """Mix 搜索: 实体 + 关系 + 原始文本块 (推荐)
         
+        Args:
+            query: 查询文本
+            top_k: 检索数量
+            query_emb: 预计算的 query embedding (可选，用于异步场景)
+        """
+        if query_emb is None:
+            query_emb = self._get_embedding(query)
+        
+        third_k = max(1, top_k // 3)
         context_parts = []
         
         # 1. 检索实体
@@ -541,12 +581,19 @@ class GraphRAGLite:
         
         return "\n".join(context_parts)
 
-    def naive_search(self, query: str, top_k: int) -> str:
-        """Naive 搜索: 仅原始文本块检索 (传统 RAG baseline)"""
+    def naive_search(self, query: str, top_k: int, query_emb: list[float] = None) -> str:
+        """Naive 搜索: 仅原始文本块检索 (传统 RAG baseline)
+        
+        Args:
+            query: 查询文本
+            top_k: 检索数量
+            query_emb: 预计算的 query embedding (可选，用于异步场景)
+        """
         if not self.chunks:
             return ""
         
-        query_emb = self._get_embedding(query)
+        if query_emb is None:
+            query_emb = self._get_embedding(query)
         
         chunk_keys = list(self.chunks.keys())
         chunk_vecs = [self.embeddings.get(f"chunk:{k}", []) for k in chunk_keys]
@@ -621,7 +668,6 @@ class GraphRAGLite:
         if self.enable_cache and cache_path.exists():
             with open(cache_path, "r", encoding="utf-8") as f:
                 self._llm_cache = json.load(f)
-            logger.info(f"[Load] LLM Cache: {len(self._llm_cache)}")
 
     # ==================== 辅助方法 ====================
     
@@ -705,15 +751,17 @@ class GraphRAGLite:
                 yield chunk.choices[0].delta.content
 
     async def _aget_embedding(self, text: str) -> list[float]:
-        """异步获取单个文本 embedding"""
-        response = await self.async_client.embeddings.create(
-            model=self.embedding_model,
-            input=text,
-        )
-        return response.data[0].embedding
+        """异步获取单条 embedding (带缓存，用于 query)"""
+        cache_key = f"query:{hashlib.md5(text.encode()).hexdigest()}"
+        if cache_key in self.embeddings:
+            return self.embeddings[cache_key]
+        
+        emb = (await self._aget_embeddings_batch([text]))[0]
+        self.embeddings[cache_key] = emb
+        return emb
 
     async def _aget_embeddings_batch(self, texts: list[str], show_progress: bool = False, desc: str = "Embeddings") -> list[list[float]]:
-        """异步批量获取 embedding"""
+        """异步批量获取 embedding (带重试)"""
         if not texts:
             return []
         
@@ -727,12 +775,24 @@ class GraphRAGLite:
             nonlocal batch, batch_tokens, all_embeddings
             if not batch:
                 return
-            resp = await self.async_client.embeddings.create(
-                model=self.embedding_model,
-                input=batch,
-            )
-            all_embeddings.extend([d.embedding for d in resp.data])
-            pbar.update(len(batch))
+            
+            # 重试逻辑
+            for attempt in range(EMB_MAX_RETRIES):
+                try:
+                    resp = await self.async_client.embeddings.create(
+                        model=self.embedding_model,
+                        input=batch,
+                    )
+                    all_embeddings.extend([d.embedding for d in resp.data])
+                    pbar.update(len(batch))
+                    break
+                except Exception as e:
+                    if attempt < EMB_MAX_RETRIES - 1:
+                        logger.warning(f"[Embedding] 第 {attempt + 1} 次失败，{EMB_RETRY_DELAY}s 后重试: {e}")
+                        await asyncio.sleep(EMB_RETRY_DELAY)
+                    else:
+                        raise
+            
             batch = []
             batch_tokens = 0
         
@@ -977,166 +1037,28 @@ class GraphRAGLite:
         Returns:
             str 或 AsyncGenerator (stream=True)
         """
-        # 1. 根据模式检索 (检索部分使用异步 embedding)
+        # 1. 异步获取 query embedding (带缓存)
         query_emb = await self._aget_embedding(question)
         
+        # 2. 根据模式检索 (复用同步方法，传入预计算的 embedding)
         if mode == "local":
-            context = self.local_search_with_emb(query_emb, top_k)
+            context = self.local_search(question, top_k, query_emb=query_emb)
         elif mode == "global":
-            context = self.global_search_with_emb(query_emb, top_k)
+            context = self.global_search(question, top_k, query_emb=query_emb)
         elif mode == "mix":
-            context = self.mix_search_with_emb(query_emb, top_k)
+            context = self.mix_search(question, top_k, query_emb=query_emb)
         elif mode == "naive":
-            context = self.naive_search_with_emb(query_emb, top_k)
+            context = self.naive_search(question, top_k, query_emb=query_emb)
         else:
             raise ValueError(f"不支持的模式: {mode}, 请使用 local / global / mix / naive")
         
         if not context:
             return "未找到相关知识，无法回答。"
         
-        # 2. 生成回答
+        # 3. 生成回答
         prompt = RAG_RESPONSE_PROMPT.format(context=context, query=question)
         
         if stream:
-            logger.debug(f"[Stream] 开始流式生成回答, prompt={prompt}")
             return self._acall_llm_stream(prompt)
         else:
             return await self._acall_llm(prompt, use_cache=False)
-
-    def local_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Local 搜索 (使用预计算的 embedding)，从实体出发"""
-        if not self.entities:
-            return ""
-        
-        entity_keys = list(self.entities.keys())
-        entity_vecs = [self.embeddings.get(f"entity:{k}", []) for k in entity_keys]
-        valid_keys = [k for k, v in zip(entity_keys, entity_vecs) if v]
-        valid_vecs = [v for v in entity_vecs if v]
-        
-        top_entities = top_k_similar(query_emb, valid_keys, valid_vecs, top_k)
-        
-        context_parts = ["=== Entities ==="]
-        for idx, (name, score) in enumerate(top_entities):
-            data = self.entities[name]
-            context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
-        
-        top_entity_names = {e[0] for e in top_entities}
-        related_relations = []
-        for key in self.relations:
-            src, tgt = key.split("||")
-            if src in top_entity_names or tgt in top_entity_names:
-                related_relations.append(key)
-        
-        if related_relations:
-            context_parts.append("\n=== Relationships ===")
-            for idx, key in enumerate(related_relations[:top_k]):
-                src, tgt = key.split("||")
-                data = self.relations[key]
-                context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
-        
-        return "\n".join(context_parts)
-
-    def global_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Global 搜索 (使用预计算的 embedding)，从关系出发"""
-        if not self.relations:
-            return ""
-        
-        relation_keys = list(self.relations.keys())
-        relation_vecs = [self.embeddings.get(f"relation:{k}", []) for k in relation_keys]
-        valid_keys = [k for k, v in zip(relation_keys, relation_vecs) if v]
-        valid_vecs = [v for v in relation_vecs if v]
-        
-        top_relations = top_k_similar(query_emb, valid_keys, valid_vecs, top_k)
-        
-        context_parts = ["=== Relationships ==="]
-        for idx, (key, score) in enumerate(top_relations):
-            src, tgt = key.split("||")
-            data = self.relations[key]
-            context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
-        
-        involved_entities = set()
-        for key, _ in top_relations:
-            src, tgt = key.split("||")
-            involved_entities.add(src)
-            involved_entities.add(tgt)
-        
-        if involved_entities:
-            context_parts.append("\n=== Entities ===")
-            for idx, name in enumerate(involved_entities):
-                if name in self.entities:
-                    data = self.entities[name]
-                    context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
-        
-        return "\n".join(context_parts)
-
-    def mix_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Mix 搜索 (使用预计算的 embedding)，实体 + 关系 + 文本块"""
-        third_k = max(1, top_k // 3)
-        context_parts = []
-        
-        if self.entities:
-            entity_keys = list(self.entities.keys())
-            entity_vecs = [self.embeddings.get(f"entity:{k}", []) for k in entity_keys]
-            valid_entity_keys = [k for k, v in zip(entity_keys, entity_vecs) if v]
-            valid_entity_vecs = [v for v in entity_vecs if v]
-            top_entities = top_k_similar(query_emb, valid_entity_keys, valid_entity_vecs, third_k)
-            
-            if top_entities:
-                context_parts.append("=== Entities ===")
-                for idx, (name, _) in enumerate(top_entities):
-                    if name in self.entities:
-                        data = self.entities[name]
-                        context_parts.append(f"({idx}) {name} [{data['type']}]: {data['description']}")
-        
-        if self.relations:
-            relation_keys = list(self.relations.keys())
-            relation_vecs = [self.embeddings.get(f"relation:{k}", []) for k in relation_keys]
-            valid_relation_keys = [k for k, v in zip(relation_keys, relation_vecs) if v]
-            valid_relation_vecs = [v for v in relation_vecs if v]
-            top_relations = top_k_similar(query_emb, valid_relation_keys, valid_relation_vecs, third_k)
-            
-            if top_relations:
-                context_parts.append("\n=== Relationships ===")
-                for idx, (key, _) in enumerate(top_relations):
-                    if key in self.relations:
-                        src, tgt = key.split("||")
-                        data = self.relations[key]
-                        context_parts.append(f"({idx}) {src} -> {tgt}: {data['description']}")
-        
-        if self.chunks:
-            chunk_keys = list(self.chunks.keys())
-            chunk_vecs = [self.embeddings.get(f"chunk:{k}", []) for k in chunk_keys]
-            valid_chunk_keys = [k for k, v in zip(chunk_keys, chunk_vecs) if v]
-            valid_chunk_vecs = [v for v in chunk_vecs if v]
-            top_chunks = top_k_similar(query_emb, valid_chunk_keys, valid_chunk_vecs, third_k)
-            
-            if top_chunks:
-                context_parts.append("\n=== Sources ===")
-                for idx, (chunk_id, _) in enumerate(top_chunks):
-                    if chunk_id in self.chunks:
-                        content = self.chunks[chunk_id]["content"]
-                        if len(content) > 1000:
-                            content = content[:1000] + "..."
-                        context_parts.append(f"({idx}) {content}")
-        
-        return "\n".join(context_parts)
-
-    def naive_search_with_emb(self, query_emb: list[float], top_k: int) -> str:
-        """Naive 搜索 (使用预计算的 embedding)，仅文本块"""
-        if not self.chunks:
-            return ""
-        
-        chunk_keys = list(self.chunks.keys())
-        chunk_vecs = [self.embeddings.get(f"chunk:{k}", []) for k in chunk_keys]
-        valid_chunk_keys = [k for k, v in zip(chunk_keys, chunk_vecs) if v]
-        valid_chunk_vecs = [v for v in chunk_vecs if v]
-        
-        top_chunks = top_k_similar(query_emb, valid_chunk_keys, valid_chunk_vecs, top_k)
-        
-        context_parts = ["=== Sources ==="]
-        for idx, (chunk_id, _) in enumerate(top_chunks):
-            if chunk_id in self.chunks:
-                content = self.chunks[chunk_id]["content"]
-                context_parts.append(f"({idx}) {content}")
-        
-        return "\n".join(context_parts)

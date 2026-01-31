@@ -33,7 +33,7 @@ GraphRAG-Lite 是一个轻量、教学导向的 GraphRAG（基于图的检索增
 |------|------|
 | **4 种查询模式** | `local`、`global`、`mix`、`naive` - 选择合适的策略 |
 | **同步/异步 API** | `insert`/`ainsert`、`query`/`aquery` 双模式支持 |
-| **知识溯源** | 回答带 `[Data: Entities (X); Relationships (Y)]` 引用 |
+| **知识溯源** | 回答带 `[Entities (X); Relationships (Y)]` 引用 |
 | **批量 Embedding** | 智能批处理减少 API 调用 |
 | **流式输出** | 实时响应流（同步/异步均支持） |
 | **持久化存储** | 基于 JSON 存储，无需外部数据库 |
@@ -125,8 +125,8 @@ answer = graph.query("发生了什么？", mode="naive")
 回答会自动带上知识图谱的引用来源，增强可信度：
 
 ```
-贾宝玉是《红楼梦》的主人公 [Data: Entities (0)]。
-他与林黛玉青梅竹马，感情深厚 [Data: Relationships (1, 2)]。
+贾宝玉是《红楼梦》的主人公 [Entities (0)]。
+他与林黛玉青梅竹马，感情深厚 [Relationships (1, 2)]。
 ```
 
 ## 流式输出
@@ -165,6 +165,10 @@ GraphRAGLite(
 | `ainsert(text, doc_id=None, show_progress=True)` | 异步插入文档（带进度条） |
 | `query(question, mode="mix", top_k=10, stream=False)` | 同步查询 |
 | `aquery(question, mode="mix", top_k=10, stream=False)` | 异步查询 |
+| `local_search(query, top_k)` | 从实体出发检索，返回实体 + 相关关系 |
+| `global_search(query, top_k)` | 从关系出发检索，返回关系 + 相关实体 |
+| `mix_search(query, top_k)` | 混合检索实体 + 关系 + 文本块 |
+| `naive_search(query, top_k)` | 仅检索文本块 |
 | `has_data()` | 检查图谱是否有数据 |
 | `get_stats()` | 获取图谱统计信息 |
 | `list_entities()` | 列出所有实体 |

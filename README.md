@@ -25,7 +25,6 @@ GraphRAG-Lite is a lightweight, educational implementation of GraphRAG (Graph-ba
 - **Production Patterns**: Real-world optimizations like batch embeddings and LLM caching
 - **Sync/Async APIs**: Both synchronous and asynchronous methods for different use cases
 - **Knowledge Traceability**: Answers include citations to knowledge graph sources
-- **Flexible Retrieval**: 4 query modes for different use cases
 - **Minimal Dependencies**: Just `openai`, `numpy`, `tiktoken`, `loguru`, and `tqdm`
 
 ## Features
@@ -34,12 +33,9 @@ GraphRAG-Lite is a lightweight, educational implementation of GraphRAG (Graph-ba
 |---------|-------------|
 | **4 Query Modes** | `local`, `global`, `mix`, `naive` - choose the right strategy |
 | **Sync/Async APIs** | `insert`/`ainsert`, `query`/`aquery` dual-mode support |
-| **Knowledge Traceability** | Answers with `[Data: Entities (X); Relationships (Y)]` citations |
+| **Knowledge Traceability** | Answers with `[Entities (X); Relationships (Y)]` citations |
 | **Batch Embeddings** | Reduce API calls with intelligent batching |
-| **LLM Caching** | Avoid redundant LLM requests |
 | **Streaming Output** | Real-time response streaming (sync and async) |
-| **Progress Bar** | Visual progress for large document processing |
-| **NumPy Acceleration** | Fast vector similarity search |
 | **Persistent Storage** | JSON-based storage, no external database needed |
 
 ## Installation
@@ -129,8 +125,8 @@ answer = graph.query("What happened?", mode="naive")
 Answers automatically include citations to knowledge graph sources for credibility:
 
 ```
-Ebenezer Scrooge is the main character of "A Christmas Carol" [Data: Entities (0)].
-He was the business partner of Jacob Marley [Data: Relationships (1, 2)].
+Ebenezer Scrooge is the main character of "A Christmas Carol" [Entities (0)].
+He was the business partner of Jacob Marley [Relationships (1, 2)].
 ```
 
 ## Streaming Output
@@ -169,6 +165,10 @@ GraphRAGLite(
 | `ainsert(text, doc_id=None, show_progress=True)` | Async insert document (with progress bar) |
 | `query(question, mode="mix", top_k=10, stream=False)` | Sync query |
 | `aquery(question, mode="mix", top_k=10, stream=False)` | Async query |
+| `local_search(query, top_k)` | Search from entities → related relations |
+| `global_search(query, top_k)` | Search from relations → related entities |
+| `mix_search(query, top_k)` | Search entities + relations + text chunks |
+| `naive_search(query, top_k)` | Search text chunks only |
 | `has_data()` | Check if graph has data |
 | `get_stats()` | Get graph statistics |
 | `list_entities()` | List all entities |

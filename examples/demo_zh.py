@@ -13,7 +13,7 @@ graphrag-lite 中文使用示例
 
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from graphrag_lite import GraphRAGLite
 
 
@@ -70,6 +70,7 @@ def main():
         "贾宝玉和林黛玉是什么关系？",
         "薛宝钗是什么样的人？",
         "王熙凤在贾府担任什么职务？",
+        "孙悟空是谁？"
     ]
     
     for q in questions:

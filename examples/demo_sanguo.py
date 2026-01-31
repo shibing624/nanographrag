@@ -14,8 +14,7 @@ graphrag-lite 三国演义示例 (演示异步 API)
 import os
 import sys
 import asyncio
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from graphrag_lite import GraphRAGLite
 
 
